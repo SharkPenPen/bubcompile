@@ -26,11 +26,23 @@ jobs:
         run: cargo build --release --features ${{ matrix.rev }}
         env:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "z"
+      - name: Install espflash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev
+          cargo install espflash --version "^3" --locked
+      - name: Generate app image
+        working-directory: firmware/handheld
+        run: |
+          mkdir -p artifacts
+          espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/release/handheld artifacts/handheld-${{ matrix.rev }}.bin
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: handheld-${{ matrix.rev }}
-          path: firmware/handheld/target/xtensa-esp32s3-espidf/release/handheld
+          path: |
+            firmware/handheld/target/xtensa-esp32s3-espidf/release/handheld
+            firmware/handheld/artifacts/handheld-${{ matrix.rev }}.bin
 
   dfu:
     name: handheld-dfu
