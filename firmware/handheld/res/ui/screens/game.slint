@@ -1,0 +1,78 @@
+import { Global, ScreenId, Backend } from "../common.slint";
+import { ScreenBase } from "../components/screen.slint";
+import { Button } from "../components/button.slint";
+import { ButtonList } from "../components/button_list.slint";
+
+export component GameScreen inherits ScreenBase {
+    private property <bool> menu-open: false;
+    forward-focus: i-focus-scope;
+
+    protected function set-menu-open(open: bool) {
+        Global.ui-status-bar = open;
+        Backend.game-set-focused(!open);
+        self.menu-open = open;
+        if (menu-open) {
+            i-list.focus();
+        } else {
+            i-focus-scope.focus();
+        }
+    }
+
+    i-focus-scope := FocusScope {
+        key-released(event) => {
+            if (event.text == "Home" || event.text == "h") && !Global.home-consumed {
+                set-menu-open(!root.menu-open);
+            }
+            if (event.text == "Power") {
+                set-menu-open(true);
+            }
+            reject
+        }
+
+        menu := Rectangle {
+            visible: menu-open;
+            background: #FFF;
+            border-color: black;
+            border-width: 1px;
+            width: i-list.min-width + 20px;
+            height: i-list.min-height;
+
+            i-list := ButtonList {
+                items: ["Return", "Reset", "Exit Core"];
+                on-selected(item) => {
+                    if (item == 0) {
+                        root.set-menu-open(false);
+                    } else if (item == 1) {
+                        Backend.game-reset();
+                        root.set-menu-open(false);
+                    } else if (item == 2) {
+                        Backend.game-exit();
+                    }
+                }
+            }
+        }
+
+        if Backend.core-is-loading:  Rectangle {
+            background: #FFF;
+            border-color: black;
+            border-width: 1px;
+            width: i-loading-layout.min-width;
+            height: i-loading-layout.min-height;
+
+            i-loading-layout := VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                i-text := Text {
+                    horizontal-alignment: center;
+                    text: "Loading...";
+                }
+
+                Rectangle {
+                    background: black;
+                    width: Backend.core-progress * i-text.min-width;
+                    height: 2px;
+                }
+            }
+        }
+    }
+}

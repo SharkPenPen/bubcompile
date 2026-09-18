@@ -1,0 +1,98 @@
+import { ListViewBase } from "../../components/list_view.slint";
+import { ControlHint } from "../../components/control_hint.slint";
+import { CoreListEntry } from "types.slint";
+
+component CoreListItem inherits HorizontalLayout {
+    in property <CoreListEntry> core;
+    padding: 2px;
+
+    Text {
+        text: core.core-name;
+        horizontal-alignment: left;
+        overflow: elide;
+        min-width: 160px;
+        horizontal-stretch: 2.0;
+    }
+
+    Text {
+        text: core.core-author;
+        horizontal-alignment: right;
+        overflow: elide;
+        color: #666;
+        min-width: 80px;
+        horizontal-stretch: 1.0;
+    }
+}
+
+
+export component CoreList {
+    in property <[CoreListEntry]> cores;
+    in property <bool> is-loading: cores.length == 0;
+
+    callback on-cancel();
+    callback on-core-selected(/* selected-item */ int);
+
+    forward-focus: i-list;
+
+    // Loading box
+    if is-loading: Rectangle {
+        background: #FFF;
+        border-color: black;
+        border-width: 1px;
+        width: i-layout.min-width;
+        height: i-layout.min-height;
+
+        i-layout := VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+            Text {
+                horizontal-alignment: center;
+                text: "Loading...";
+            }
+        }
+    }
+
+    i-focus-scope := FocusScope {
+        key-pressed(event) => {
+            if (is-loading) {
+                reject
+            } else if (event.text == "b") {
+                on-cancel();
+                accept
+            } else {
+                reject
+            }
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+
+            i-list := ListViewBase {
+                num-items: cores.length;
+                wrap: true;
+
+                for item[index] in cores: child-items := CoreListItem {
+                    core: item;
+                }
+
+                on-item-selected(i) => {
+                    on-core-selected(i);
+                }
+            }
+
+            HorizontalLayout {
+                alignment: space-between;
+
+                ControlHint {
+                    label: "Back";
+                    button: "b";
+                }
+
+                ControlHint {
+                    label: "Select";
+                    button: "a";
+                }
+            }
+        }
+    }
+}

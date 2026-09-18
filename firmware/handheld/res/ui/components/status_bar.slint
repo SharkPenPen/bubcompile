@@ -1,0 +1,33 @@
+import { Backend } from "../common.slint";
+import { Icons } from "../icons.slint";
+
+export component StatusBar inherits Rectangle {
+    in property <string> title;
+
+    x: 0;
+    y: 0;
+    width: 100%;
+    height: 16px;
+    background: #ccc;
+
+    HorizontalLayout {
+        spacing: 4px;
+        padding-left: 4px;
+        padding-right: 4px;
+        height: 100%;
+
+        // Title text
+        Text {
+            text: root.title;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+
+        // Battery text
+        Text {
+            text: "\{Backend.battery-level}%";
+            horizontal-stretch: 0;
+            vertical-alignment: center;
+        }
+    }
+}
