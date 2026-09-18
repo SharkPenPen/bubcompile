@@ -1,0 +1,50 @@
+name: Build Firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  handheld:
+    name: handheld (${{ matrix.rev }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: [rev2, rev4]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+      - name: Build
+        working-directory: firmware/handheld
+        run: cargo build --release --features ${{ matrix.rev }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: handheld-${{ matrix.rev }}
+          path: firmware/handheld/target/xtensa-esp32s3-espidf/release/handheld
+
+  dfu:
+    name: handheld-dfu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32s3
+      - name: Build
+        working-directory: firmware/handheld-dfu
+        run: cargo build --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: handheld-dfu
+          path: firmware/handheld-dfu/target/xtensa-esp32s3-none-elf/release/handheld-dfu
