@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rev: [rev2, rev4]
+        rev: [rev2]
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -24,6 +24,8 @@ jobs:
       - name: Build
         working-directory: firmware/handheld
         run: cargo build --release --features ${{ matrix.rev }}
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "z"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
