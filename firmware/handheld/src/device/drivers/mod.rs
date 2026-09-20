@@ -15,6 +15,4 @@ pub mod lcd_backlight;
 pub mod max17048;
 pub mod rtc;
 pub mod sdcard;
-#[cfg(feature = "has_st7262")]
-pub mod st7262;
 pub mod usb;

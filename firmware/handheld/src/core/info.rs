@@ -198,12 +198,8 @@ pub fn get_core(id: &str) -> Result<CoreInfo, String> {
 }
 
 fn get_device_target() -> &'static str {
-    #[cfg(feature = "rev1")]
-    const TARGET: &'static str = "gamebub_rev1";
     #[cfg(feature = "rev2")]
     const TARGET: &'static str = "gamebub_rev2";
-    #[cfg(feature = "rev3")]
-    const TARGET: &'static str = "gamebub_rev3";
     #[cfg(feature = "rev4")]
     const TARGET: &'static str = "gamebub_rev4";
 

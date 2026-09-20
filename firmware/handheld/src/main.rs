@@ -51,12 +51,8 @@ fn main() -> anyhow::Result<()> {
 
     // Check that the firmware is compatible with the listed revision.
     cfg_if::cfg_if! {
-        if #[cfg(feature = "rev1")] {
-            let required_revision = 1;
-        } else if #[cfg(feature = "rev2")] {
+        if #[cfg(feature = "rev2")] {
             let required_revision = 2;
-        } else if #[cfg(feature = "rev3")] {
-            let required_revision = 3;
         } else if #[cfg(feature = "rev4")] {
             let required_revision = 4;
         } else {

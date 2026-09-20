@@ -27,17 +27,4 @@ impl Device<'_> {
         state.btn_power = self.button_power.is_low();
         Ok(state)
     }
-
-    /// Get whether an HDMI cable is plugged in based on IO expander state
-    #[cfg(feature = "rev1")]
-    pub(super) fn parse_hdmi_detect(&mut self, io_expander: [bool; 16]) -> Result<bool, ()> {
-        // Rev 1: HDMI hot plug detect is active-low.
-        Ok(!io_expander[5])
-    }
-
-    #[cfg(feature = "rev1")]
-    pub fn read_hdmi_detect(&mut self) -> Result<bool, ()> {
-        let io_expander = self.io_expander.get_pins().map_err(|_| ())?;
-        self.parse_hdmi_detect(io_expander)
-    }
 }

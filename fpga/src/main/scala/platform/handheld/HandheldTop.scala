@@ -37,7 +37,7 @@ object HandheldTop extends App {
 
   private def getRevision(name: String): Revision = {
     name match {
-      case "1" | "2" => Revision(
+      case "2" => Revision(
         displayWidth = 480,
         displayHeight = 320,
         displayRotate = true,
@@ -52,22 +52,6 @@ object HandheldTop extends App {
         getClockDisplayHz = ILI9488.getClockDisplayHz,
         overlayWidth = 240,
         overlayHeight = 160,
-        numSdramChips = 1,
-      )
-      case "3" => Revision(
-        displayWidth = 800,
-        displayHeight = 480,
-        displayColorDepth = 6,
-        displayDriverFactory = (sourceFramePeriod, clockHz) => {
-          val driver = Module(new ST7262E43(
-            clockHz,
-            sourceFramePeriod,
-          ))
-          (driver, driver.io)
-        },
-        getClockDisplayHz = (_) => (26_099_000, 26_100_000),
-        overlayWidth = 360,
-        overlayHeight = 240,
         numSdramChips = 1,
       )
       case "4" => Revision(
@@ -890,7 +874,7 @@ class HandheldTop[T <: Core](coreFactory: () => T, revision: Revision) extends M
     }
   }
 
-  // Cartridge voltage control: Rev1 and Rev2 only
+  // Cartridge voltage control: Rev2 only
   io.cartridge3V3Enable := RegNext(io.cartridge.enabled && !io.cartridge.switch)
   io.cartridge5V0Enable := RegNext(io.cartridge.enabled && io.cartridge.switch)
 

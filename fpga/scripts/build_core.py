@@ -26,7 +26,7 @@ class Target:
 
 # Generate Target list
 TARGETS = []
-for r in [1, 2, 3, 4]:
+for r in [2, 4]:
     TARGETS.append(
         Target(
             name=f"gamebub_rev{r}",

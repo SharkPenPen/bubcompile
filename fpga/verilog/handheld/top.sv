@@ -56,10 +56,6 @@ module top_handheld (
     output wire        cart_bank2_dir,
     output wire        cart_bank3_dir,
     input  wire        cart_switch,
-`ifdef BOARD_REV_1
-    output wire        cart_en_3v3,
-    output wire        cart_en_5v0,
-`endif
 `ifdef BOARD_REV_2
     output wire        cart_en_3v3,
     output wire        cart_en_5v0,
@@ -105,12 +101,7 @@ module top_handheld (
     inout  wire [3:0]  tp,
 `endif
 
-`ifdef BOARD_REV_1
-    output wire        vibrate_en,
-`elsif BOARD_REV_2
-    output wire        vibrate_en,
-    output wire        vibrate_brake_n,
-`elsif BOARD_REV_3
+`ifdef BOARD_REV_2
     output wire        vibrate_en,
     output wire        vibrate_brake_n,
 `else
@@ -118,10 +109,8 @@ module top_handheld (
     output wire        vibrate_in2,
 `endif
 
-`ifndef BOARD_REV_1
     inout  wire        usb_sbu_1,
     inout  wire        usb_sbu_2,
-`endif
 
     output wire        hdmi_clk_p,
     output wire        hdmi_clk_n,
@@ -220,10 +209,6 @@ module top_handheld (
     logic inner_vibrate;
 
 // Pins no longer connected, stub out.
-`ifdef BOARD_REV_3
-    logic cart_en_3v3;
-    logic cart_en_5v0;
-`endif
 `ifdef BOARD_REV_4
     logic cart_en_3v3;
     logic cart_en_5v0;
@@ -383,12 +368,7 @@ module top_handheld (
     assign pmod[2] = inner_pmod_dir[2] ? inner_pmod_out[2] : 1'bz;
     assign pmod[3] = inner_pmod_dir[3] ? inner_pmod_out[3] : 1'bz;
 
-`ifdef BOARD_REV_1
-    assign vibrate_en = inner_vibrate;
-`elsif BOARD_REV_2
-    assign vibrate_en = inner_vibrate;
-    assign vibrate_brake_n = 1'bz;
-`elsif BOARD_REV_3
+`ifdef BOARD_REV_2
     assign vibrate_en = inner_vibrate;
     assign vibrate_brake_n = 1'bz;
 `else
@@ -396,13 +376,8 @@ module top_handheld (
     assign vibrate_in2 = 1'b0;
 `endif
 
-`ifdef BOARD_REV_1
-    // Rev 1: FPGA irq directly connected to open-drain MCU_INT
-    assign mcu_irq_n = inner_mcu_irq ? 1'b0 : 1'bz;
-`else
-    // Rev 2, 3, 4: FPGA irq connected to nFET, active-high
+    // Rev 2, 4: FPGA irq connected to nFET, active-high
     assign mcu_irq_n = inner_mcu_irq;
-`endif
     assign inner_mcu_spi_data_in = mcu_spi_d;
     assign mcu_spi_d[0] = inner_mcu_spi_data_dir[0] ? inner_mcu_spi_data_out[0] : 1'bz;
     assign mcu_spi_d[1] = inner_mcu_spi_data_dir[1] ? inner_mcu_spi_data_out[1] : 1'bz;
@@ -453,14 +428,6 @@ module top_handheld (
         .cx(hdmi_cx),
         .cy(hdmi_cy)
     );
-`ifdef BOARD_REV_1
-    defparam hdmi.INVERT_D0 = 1;
-
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds0      (.I(hdmi_tmds_data[0]), .O(hdmi_data_n[0]), .OB(hdmi_data_p[0]));
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds1      (.I(hdmi_tmds_data[1]), .O(hdmi_data_p[1]), .OB(hdmi_data_n[1]));
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds2      (.I(hdmi_tmds_data[2]), .O(hdmi_data_p[2]), .OB(hdmi_data_n[2]));
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds_clock (.I(hdmi_tmds_clock  ), .O(hdmi_clk_p    ), .OB(hdmi_clk_n    ));
-`endif
 `ifdef BOARD_REV_2
     defparam hdmi.INVERT_D0 = 1;
     defparam hdmi.INVERT_D1 = 1;
@@ -471,12 +438,6 @@ module top_handheld (
     OBUFDS #(.IOSTANDARD("TMDS_33")) obufds1      (.I(hdmi_tmds_data[1]), .O(hdmi_data_n[1]), .OB(hdmi_data_p[1]));
     OBUFDS #(.IOSTANDARD("TMDS_33")) obufds2      (.I(hdmi_tmds_data[2]), .O(hdmi_data_n[2]), .OB(hdmi_data_p[2]));
     OBUFDS #(.IOSTANDARD("TMDS_33")) obufds_clock (.I(hdmi_tmds_clock  ), .O(hdmi_clk_n    ), .OB(hdmi_clk_p    ));
-`endif
-`ifdef BOARD_REV_3
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds0      (.I(hdmi_tmds_data[0]), .O(hdmi_data_p[0]), .OB(hdmi_data_n[0]));
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds1      (.I(hdmi_tmds_data[1]), .O(hdmi_data_p[1]), .OB(hdmi_data_n[1]));
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds2      (.I(hdmi_tmds_data[2]), .O(hdmi_data_p[2]), .OB(hdmi_data_n[2]));
-    OBUFDS #(.IOSTANDARD("TMDS_33")) obufds_clock (.I(hdmi_tmds_clock  ), .O(hdmi_clk_p    ), .OB(hdmi_clk_n    ));
 `endif
 `ifdef BOARD_REV_4
     // TODO: this is due to the dock, not the handheld

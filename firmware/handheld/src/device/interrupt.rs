@@ -99,8 +99,6 @@ impl Device<'_> {
                 }
 
                 #[allow(unused)]
-                let mut prev_hdmi_detected: Option<bool> = None;
-                #[allow(unused)]
                 let mut prev_vbus_pgood: Option<bool> = None;
 
                 loop {
@@ -128,34 +126,17 @@ impl Device<'_> {
                     }
                     let mut poll_buttons = (flags & FLAG_BUTTONS) != 0;
 
-                    // Rev 1 and 2, must read I/O expander to clear IRQ.
+                    // Rev 2, must read I/O expander to clear IRQ.
                     #[cfg(feature = "has_io_expander")]
                     #[allow(unused)]
                     let io_expander = device.io_expander.get_pins().unwrap();
 
-                    // Handle dock monitoring
-                    cfg_if::cfg_if! {
-                        if #[cfg(feature = "rev1")] {
-                            // Docking is based on HDMI hot plug
-                            let hdmi_detected = device.parse_hdmi_detect(io_expander).unwrap();
-                            if prev_hdmi_detected != Some(hdmi_detected) {
-                                prev_hdmi_detected = Some(hdmi_detected);
-
-                                if hdmi_detected {
-                                    worker::send(worker::Message::DockBegin { serial: 0, hardware: 0, firmware: 0 });
-                                } else {
-                                    worker::send(worker::Message::DockEnd);
-                                }
-                            }
-                        } else {
-                            // On VBUS pgood falling, force undock
-                            let vbus_pgood = device.get_vbus_pgood();
-                            if prev_vbus_pgood != Some(vbus_pgood) {
-                                prev_vbus_pgood = Some(vbus_pgood);
-                                if !vbus_pgood {
-                                    worker::send(worker::Message::DockEnd);
-                                }
-                            }
+                    // Handle dock monitoring: on VBUS pgood falling, force undock
+                    let vbus_pgood = device.get_vbus_pgood();
+                    if prev_vbus_pgood != Some(vbus_pgood) {
+                        prev_vbus_pgood = Some(vbus_pgood);
+                        if !vbus_pgood {
+                            worker::send(worker::Message::DockEnd);
                         }
                     }
 

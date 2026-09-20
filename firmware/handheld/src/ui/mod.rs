@@ -26,7 +26,7 @@ use self::{slint::Argb1555, slint::MinimalSoftwareWindow, state::UiState};
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 cfg_if::cfg_if! {
-    if #[cfg(any(feature = "rev1", feature = "rev2"))] {
+    if #[cfg(feature = "rev2")] {
         const DISPLAY_WIDTH: usize = 480 / 2;
         const DISPLAY_HEIGHT: usize = 320 / 2;
     } else {

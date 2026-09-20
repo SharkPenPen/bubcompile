@@ -19,14 +19,11 @@ opt-level = "z"
 
 [features]
 default = ["std", "embassy", "esp-idf-svc/native"]
-rev1 = ["has_io_expander", "has_ili9488", "has_max17048"]  # Build for handheld revision 1
 rev2 = ["has_io_expander", "has_ili9488", "has_max17048"]  # Build for handheld revision 2
-rev3 = ["has_st7262", "has_bq27427"]  # Build for handheld revision 3
 rev4 = ["has_ili9806e", "has_bq27427"]  # Build for handheld revision 4
 
 has_io_expander = []
 has_ili9488 = []
-has_st7262 = []
 has_max17048 = []
 has_bq27427 = []
 has_ili9806e = []
