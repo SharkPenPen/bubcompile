@@ -47,7 +47,9 @@ jobs:
           set -x
           python3 -m venv "$RUNNER_TEMP/esptool-venv"
           "$RUNNER_TEMP/esptool-venv/bin/pip" install --quiet "esptool<5"
-          "$RUNNER_TEMP/esptool-venv/bin/esptool" --chip esp32s3 merge_bin \
+          ls -la "$RUNNER_TEMP/esptool-venv/bin"
+          "$RUNNER_TEMP/esptool-venv/bin/python" -m esptool version
+          "$RUNNER_TEMP/esptool-venv/bin/python" -m esptool --chip esp32s3 merge_bin \
             -o "artifacts/handheld-${{ matrix.rev }}-full.bin" \
             --flash_mode qio --flash_freq 80m --flash_size 8MB \
             0x0 artifacts/bootloader.bin \
