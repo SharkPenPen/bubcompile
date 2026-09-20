@@ -31,18 +31,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libudev-dev
           cargo install espflash --version "^3" --locked
-      - name: Generate app image
+      - name: Generate flash images
         working-directory: firmware/handheld
         run: |
           mkdir -p artifacts
           espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/release/handheld artifacts/handheld-${{ matrix.rev }}.bin
+          GEN=$(find "$HOME/.espressif/esp-idf" -name gen_esp32part.py -print -quit)
+          python3 "$GEN" partitions.csv artifacts/partition-table.bin
+          cp bootloader.bin artifacts/bootloader.bin
+          ls -la artifacts
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: handheld-${{ matrix.rev }}
-          path: |
-            firmware/handheld/target/xtensa-esp32s3-espidf/release/handheld
-            firmware/handheld/artifacts/handheld-${{ matrix.rev }}.bin
+          path: firmware/handheld/artifacts/
 
   dfu:
     name: handheld-dfu
@@ -57,8 +59,19 @@ jobs:
       - name: Build
         working-directory: firmware/handheld-dfu
         run: cargo build --release
+      - name: Install espflash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev
+          cargo install espflash --version "^3" --locked
+      - name: Generate dfu image
+        working-directory: firmware/handheld-dfu
+        run: |
+          mkdir -p artifacts
+          espflash save-image --chip esp32s3 target/xtensa-esp32s3-none-elf/release/handheld-dfu artifacts/handheld-dfu.bin
+          ls -la artifacts
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: handheld-dfu
-          path: firmware/handheld-dfu/target/xtensa-esp32s3-none-elf/release/handheld-dfu
+          path: firmware/handheld-dfu/artifacts/
