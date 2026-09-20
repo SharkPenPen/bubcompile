@@ -75,3 +75,31 @@ jobs:
         with:
           name: handheld-dfu
           path: firmware/handheld-dfu/artifacts/
+
+  system-files:
+    name: system files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build heatshrink
+        run: |
+          git clone --depth 1 https://github.com/atomicobject/heatshrink.git "$RUNNER_TEMP/heatshrink"
+          make -C "$RUNNER_TEMP/heatshrink"
+          "$RUNNER_TEMP/heatshrink/heatshrink" -h || true
+      - name: Convert bitstreams
+        run: |
+          set -x
+          mkdir -p out
+          for n in boot gameboy gba; do
+            gzip -dc "system-src/$n.bit.gz" > "$RUNNER_TEMP/$n.bit"
+            H="$RUNNER_TEMP/heatshrink/heatshrink"
+            "$H" -w 9 -l 6 "$RUNNER_TEMP/$n.bit" "out/$n.bit.hs" \
+              || "$H" -e -w 9 -l 6 "$RUNNER_TEMP/$n.bit" "out/$n.bit.hs" \
+              || "$H" -w 9 -l 6 -i "$RUNNER_TEMP/$n.bit" -o "out/$n.bit.hs" \
+              || "$H" -e -w 9 -l 6 < "$RUNNER_TEMP/$n.bit" > "out/$n.bit.hs"
+            ls -l "out/$n.bit.hs"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: system-files
+          path: out/
