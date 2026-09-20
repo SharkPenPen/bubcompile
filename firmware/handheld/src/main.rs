@@ -3,7 +3,7 @@ use anyhow::Context;
 use device::Device;
 
 use crate::{
-    device::drivers::{fpga, usb},
+    device::drivers::fpga,
     ui::UI,
 };
 
@@ -41,9 +41,6 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::set_target_level("gpio", log::LevelFilter::Warn).unwrap();
     crash_handler::setup();
 
-    if let Err(e) = usb::configure_usb(usb::UsbMode::ConsoleOnly) {
-        log::error!("USB setup failed: {:?}", e);
-    }
 
     log::info!("Hardware version: {}", hwinfo::get_hardware_version());
     log::info!("Serial: {}", hwinfo::get_serial_number());
