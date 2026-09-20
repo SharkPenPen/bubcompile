@@ -40,6 +40,18 @@ jobs:
           python3 "$GEN" partitions.csv artifacts/partition-table.bin
           cp bootloader.bin artifacts/bootloader.bin
           ls -la artifacts
+      - name: Merge full flash image (single file for flashing)
+        working-directory: firmware/handheld
+        run: |
+          python3 -m venv "$RUNNER_TEMP/esptool-venv"
+          "$RUNNER_TEMP/esptool-venv/bin/pip" install --quiet "esptool<5"
+          "$RUNNER_TEMP/esptool-venv/bin/esptool" --chip esp32s3 merge_bin \
+            -o "artifacts/handheld-${{ matrix.rev }}-full.bin" \
+            --flash_mode qio --flash_freq 80m --flash_size 8MB \
+            0x0 artifacts/bootloader.bin \
+            0x8000 artifacts/partition-table.bin \
+            0x100000 "artifacts/handheld-${{ matrix.rev }}.bin"
+          ls -la artifacts
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
