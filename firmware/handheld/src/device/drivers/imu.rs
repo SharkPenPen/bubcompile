@@ -20,8 +20,8 @@ const REG_OUTX_L_XL: u8 = 0x28;
 pub enum Error {
     #[error("i2c error")]
     I2cError,
-    #[error("incorrect chip id")]
-    ChipId,
+    #[error("incorrect chip id: 0x{0:02X}")]
+    ChipId(u8),
 }
 
 pub struct LSM6DS3TRC<I2C> {
@@ -53,13 +53,35 @@ where
     }
 
     pub fn init(&mut self) -> Result<(), Error> {
-        // Check chip ID.
-        let mut chip_id = 0u8;
-        self.i2c
-            .write_read(ADDRESS, &[REG_WHO_AM_I], std::slice::from_mut(&mut chip_id))
-            .map_err(|_| Error::I2cError)?;
-        if chip_id != 0x6A {
-            return Err(Error::ChipId);
+        // Probe the WHO_AM_I register with retries: a single marginal read
+        // (bus noise, stale I2C data, power-up slack) must not abort boot.
+        let mut last_id: Option<u8> = None;
+        for attempt in 1..=5u32 {
+            let mut chip_id = 0u8;
+            match self
+                .i2c
+                .write_read(ADDRESS, &[REG_WHO_AM_I], std::slice::from_mut(&mut chip_id))
+            {
+                Ok(()) => {
+                    last_id = Some(chip_id);
+                    if chip_id == 0x6A {
+                        break;
+                    }
+                    log::warn!(
+                        "IMU WHO_AM_I read 0x{:02X} (expected 0x6A), attempt {}/5",
+                        chip_id, attempt
+                    );
+                }
+                Err(_) => {
+                    log::warn!("IMU WHO_AM_I read failed, attempt {}/5", attempt);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match last_id {
+            Some(0x6A) => {}
+            Some(id) => return Err(Error::ChipId(id)),
+            None => return Err(Error::I2cError),
         }
 
         self.reset()?;

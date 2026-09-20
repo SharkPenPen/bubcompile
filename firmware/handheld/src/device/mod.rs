@@ -393,7 +393,9 @@ impl Device<'_> {
 
         // Setup IMU
         let mut imu = drivers::imu::LSM6DS3TRC::new(MutexI2C::new(&i2c));
-        imu.init().context("IMU init")?;
+        if let Err(e) = imu.init() {
+            log::warn!("IMU init failed: {e}; continuing without IMU");
+        }
 
         // Ensure fpga power has stabilized.
         let time_since_fpga_power = Instant::now().duration_since(fpga_power_time);
