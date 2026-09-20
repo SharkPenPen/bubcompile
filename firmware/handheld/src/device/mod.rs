@@ -299,6 +299,7 @@ impl Device<'_> {
                     Option::<AnyInputPin>::None,
                     &spi_driver_config,
                 ).context("lcd spi driver")?));
+            }
 
         }
 
