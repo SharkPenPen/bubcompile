@@ -21,6 +21,7 @@ use esp_idf_svc::hal::units::{FromValueType, Hertz};
 use esp_idf_svc::hal::{i2c::*, ledc};
 
 pub mod drivers;
+pub mod test_hardware;
 mod input;
 mod interrupt;
 mod led;

@@ -71,6 +71,9 @@ fn main() -> anyhow::Result<()> {
     if device.sdcard.is_none() {
         log::warn!("Failed to mount SD card");
     }
+    // Boot-time hardware self-test (non-fatal; results go to the log).
+    crate::device::test_hardware::run_tests(&mut device);
+
     device.set_brightness(kvs::keys::BRIGHTNESS.get().unwrap());
 
     // Setup workers.

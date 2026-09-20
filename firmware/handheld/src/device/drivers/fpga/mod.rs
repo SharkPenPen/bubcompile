@@ -197,6 +197,26 @@ where
         Ok(())
     }
 
+    /// Read the FPGA INIT_B configuration pin (low while clearing configuration).
+    pub fn get_init_b(&mut self) -> Result<bool, Error> {
+        self.pin_init_b.is_high().map_err(|_| Error::PinError)
+    }
+
+    /// Read the FPGA DONE configuration pin (high once configuration succeeded).
+    pub fn get_done(&mut self) -> Result<bool, Error> {
+        self.pin_done.is_high().map_err(|_| Error::PinError)
+    }
+
+    /// Drive the PROGRAM_B pin. Pass true to assert it (holds configuration reset).
+    pub fn set_program_b(&mut self, low: bool) -> Result<(), Error> {
+        let result = if low {
+            self.pin_program_b.set_low()
+        } else {
+            self.pin_program_b.set_high()
+        };
+        result.map_err(|_| Error::PinError)
+    }
+
     pub fn set_system_clock_rate(&mut self, rate: Hertz) {
         self.system_clock = rate;
     }
