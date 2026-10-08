@@ -100,7 +100,7 @@ pub struct Device<'a> {
     button_vol_up: PinDriver<'a, AnyIOPin, Input>,
     button_vol_down: PinDriver<'a, AnyIOPin, Input>,
     button_power: PinDriver<'a, AnyIOPin, InputOutput>,
-    pin_irq: PinDriver<'a, AnyInputPin, Input>,
+    pin_irq: PinDriver<'a, AnyIOPin, Input>,
     pin_vbus_pgood: PinDriver<'a, AnyIOPin, Input>,
     pin_batt_chg: PinDriver<'a, AnyInputPin, Input>,
 
@@ -138,7 +138,7 @@ impl Device<'_> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "rev2")] {
                 let pin_led = peripherals.pins.gpio36.downgrade_output();
-                let pin_irq = peripherals.pins.gpio16.downgrade_input();
+                let pin_irq = peripherals.pins.gpio16.downgrade();
                 let pin_home = peripherals.pins.gpio0.downgrade();
                 let pin_vol_up = peripherals.pins.gpio41.downgrade();
                 let pin_vol_down = peripherals.pins.gpio40.downgrade();
@@ -175,7 +175,7 @@ impl Device<'_> {
                 let pin_cart_power = None;
             } else if #[cfg(feature = "rev4")] {
                 let pin_led = peripherals.pins.gpio42.downgrade_output();
-                let pin_irq = peripherals.pins.gpio6.downgrade_input();
+                let pin_irq = peripherals.pins.gpio6.downgrade();
                 let pin_home = peripherals.pins.gpio0.downgrade();
                 let pin_vol_up = peripherals.pins.gpio2.downgrade();
                 let pin_vol_down = peripherals.pins.gpio1.downgrade();
@@ -261,6 +261,9 @@ impl Device<'_> {
         // configured. Before that it floats, so pull it up: a floating input on a
         // LEVEL-triggered interrupt produced an interrupt storm that starved the
         // whole application (this was the "device does not boot" symptom).
+        //
+        // NOTE: `pin_irq` must be an `AnyIOPin` (from `.downgrade()`), not an
+        // `AnyInputPin`: `set_pull` also requires the `OutputPin` bound.
         let mut pin_irq = PinDriver::input(pin_irq)?;
         pin_irq.set_pull(gpio::Pull::Up)?;
 
