@@ -23,9 +23,30 @@ jobs:
           ldproxy: true
       - name: Build
         working-directory: firmware/handheld
-        run: cargo build --release --features ${{ matrix.rev }}
+        run: |
+          set -o pipefail
+          cargo build --release --features ${{ matrix.rev }} 2>&1 | tee "$RUNNER_TEMP/build.log"
         env:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "z"
+      # Surface the first compiler errors as check annotations. Without this the
+      # raw job log is only downloadable by someone with admin rights, so a failed
+      # build is impossible to diagnose from outside.
+      - name: Report build errors
+        if: failure()
+        run: |
+          LOG="$RUNNER_TEMP/build.log"
+          [ -f "$LOG" ] || { echo "no build log captured"; exit 0; }
+          # Prefer the first compiler errors...
+          BLOCK=$(awk '/^error(\[|:)/{found=1} found{print} found && ++n>=12{exit}' "$LOG" \
+            | grep -v '^[[:space:]]*$' | head -n 10)
+          # ...otherwise fall back to the tail of the log (cmake/kconfig failures etc).
+          if [ -z "$BLOCK" ]; then
+            BLOCK=$(tail -n 10 "$LOG" | grep -v '^[[:space:]]*$')
+          fi
+          printf '%s\n' "$BLOCK" | while IFS= read -r line; do
+            echo "::error title=build::$line"
+          done
+          exit 0
       - name: Install espflash
         run: |
           sudo apt-get update

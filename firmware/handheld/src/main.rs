@@ -72,10 +72,10 @@ fn main() -> anyhow::Result<()> {
     let _ = esp_idf_svc::log::set_target_level("gpio", log::LevelFilter::Warn);
     crash_handler::setup();
 
-    let commit = &fwinfo::GIT_COMMIT_BYTES[..4];
+    let commit = fwinfo::GIT_COMMIT_BYTES;
     log::info!("################ Game Bub handheld ################");
     log::info!("# fw version   : {}", fwinfo::FIRMWARE_VERSION);
-    log::info!("# git commit   : {commit:02x?}");
+    log::info!("# git commit   : {:02x?}", &commit[..4]);
     log::info!("# hardware     : {}", hwinfo::get_hardware_version());
     log::info!("# serial       : {}", hwinfo::get_serial_number());
     log::info!("# reset reason : {}", reset_reason_str());

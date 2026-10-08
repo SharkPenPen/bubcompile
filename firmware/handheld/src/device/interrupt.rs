@@ -1,11 +1,8 @@
 use std::{num::NonZeroU32, sync::Arc};
 
-use esp_idf_svc::{
-    hal::{
-        gpio::{InputMode, InterruptType, Pin, PinDriver},
-        task::notification::{Notification, Notifier},
-    },
-    sys::EspError,
+use esp_idf_svc::hal::{
+    gpio::{InputMode, InterruptType, Pin, PinDriver},
+    task::notification::{Notification, Notifier},
 };
 
 use crate::worker;
@@ -22,21 +19,34 @@ const FLAG_VBUS_PGOOD: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(32) };
 const FLAG_BUTTONS: u32 =
     FLAG_HOME.get() | FLAG_POWER.get() | FLAG_VOL_UP.get() | FLAG_VOL_DOWN.get();
 
+/// Subscribe `pin` and enable its interrupt.
+///
+/// Every failure is logged and skipped: one unusable pin must not stop the
+/// others, and a panic in this thread would abort the whole application.
 fn setup_gpio_interrupt(
     pin: &mut PinDriver<'_, impl Pin, impl InputMode>,
     interrupt_type: InterruptType,
     notifier: Arc<Notifier>,
     flags: NonZeroU32,
-) -> Result<(), EspError> {
+    name: &str,
+) {
     // SAFETY: only ISR-safe FreeRTOS functions will be called (task notify).
-    unsafe {
+    let subscribed = unsafe {
         pin.subscribe(move || {
             notifier.notify_and_yield(flags);
-        })?;
+        })
+    };
+    if let Err(e) = subscribed {
+        log::error!("Cannot arm {name} interrupt (subscribe): {e}");
+        return;
     }
-    pin.set_interrupt_type(interrupt_type)?;
-    pin.enable_interrupt()?;
-    Ok(())
+    if let Err(e) = pin.set_interrupt_type(interrupt_type) {
+        log::error!("Cannot arm {name} interrupt (set type): {e}");
+        return;
+    }
+    if let Err(e) = pin.enable_interrupt() {
+        log::error!("Cannot arm {name} interrupt (enable): {e}");
+    }
 }
 
 impl Device<'_> {
@@ -45,9 +55,8 @@ impl Device<'_> {
     /// * Volume up, volume down, home, and power buttons
     /// * Shared MCU_IRQ line (FPGA + DAC + fuel gauge)
     ///
-    /// Every subscription failure is logged and skipped instead of `unwrap()`-ed,
-    /// and the handler gates all FPGA access on `Device::fpga_ready`: the shared
-    /// line floats until the FPGA is configured, and a floating input on a
+    /// The handler gates all FPGA access on `Device::fpga_ready`: the shared line
+    /// floats until the FPGA is configured, and a floating input on a
     /// level-triggered interrupt used to storm and starve the whole application.
     pub(super) fn setup_interrupts() {
         std::thread::Builder::new()
@@ -58,55 +67,54 @@ impl Device<'_> {
 
                 {
                     let device = &mut Device::get().lock().unwrap();
+                    let notifier = notification.notifier();
 
-                    macro_rules! arm {
-                        ($pin:expr, $type:expr, $flag:expr, $name:literal) => {{
-                            let result = setup_gpio_interrupt(
-                                &mut $pin,
-                                $type,
-                                notification.notifier(),
-                                $flag,
-                            );
-                            if let Err(e) = result {
-                                log::error!(
-                                    "Cannot arm {} interrupt: {e}. Continuing without it",
-                                    $name
-                                );
-                            }
-                        }};
-                    }
-
-                    arm!(device.button_home, InterruptType::AnyEdge, FLAG_HOME, "Home button");
-                    arm!(
-                        device.button_power,
+                    setup_gpio_interrupt(
+                        &mut device.button_home,
                         InterruptType::AnyEdge,
+                        notifier.clone(),
+                        FLAG_HOME,
+                        "Home button",
+                    );
+                    setup_gpio_interrupt(
+                        &mut device.button_power,
+                        InterruptType::AnyEdge,
+                        notifier.clone(),
                         FLAG_POWER,
-                        "Power button"
+                        "Power button",
                     );
-                    arm!(
-                        device.button_vol_up,
+                    setup_gpio_interrupt(
+                        &mut device.button_vol_up,
                         InterruptType::AnyEdge,
+                        notifier.clone(),
                         FLAG_VOL_UP,
-                        "Vol+ button"
+                        "Vol+ button",
                     );
-                    arm!(
-                        device.button_vol_down,
+                    setup_gpio_interrupt(
+                        &mut device.button_vol_down,
                         InterruptType::AnyEdge,
+                        notifier.clone(),
                         FLAG_VOL_DOWN,
-                        "Vol- button"
+                        "Vol- button",
                     );
-                    arm!(
-                        device.pin_vbus_pgood,
+                    setup_gpio_interrupt(
+                        &mut device.pin_vbus_pgood,
                         InterruptType::AnyEdge,
+                        notifier.clone(),
                         FLAG_VBUS_PGOOD,
-                        "VBUS pgood"
+                        "VBUS pgood",
                     );
 
                     // The shared MCU_IRQ line is only driven once the FPGA is
                     // configured; `pin_irq` has an internal pull-up so a floating
-                    // line cannot trigger a storm. The handler additionally gates
-                    // all FPGA access on `Device::fpga_ready`.
-                    arm!(device.pin_irq, InterruptType::LowLevel, FLAG_MCU_IRQ, "MCU_IRQ");
+                    // line cannot trigger a storm.
+                    setup_gpio_interrupt(
+                        &mut device.pin_irq,
+                        InterruptType::LowLevel,
+                        notifier,
+                        FLAG_MCU_IRQ,
+                        "MCU_IRQ",
+                    );
                 }
 
                 #[allow(unused)]
@@ -141,8 +149,10 @@ impl Device<'_> {
                     // Rev 2: reading the I/O expander is what clears its IRQ.
                     // Non-fatal: an absent chip must not kill the handler.
                     #[cfg(feature = "has_io_expander")]
-                    if let Err(e) = device.io_expander.get_pins() {
-                        log::debug!("I/O expander read failed: {e}");
+                    {
+                        if let Err(e) = device.io_expander.get_pins() {
+                            log::debug!("I/O expander read failed: {e}");
+                        }
                     }
 
                     // Dock monitoring: on VBUS pgood falling, force undock.
@@ -159,8 +169,10 @@ impl Device<'_> {
 
                         // Fuel gauge IRQs (rev2).
                         #[cfg(feature = "has_max17048")]
-                        if let Ok(fuel_irq) = device.fuel_gauge.query_alerts() {
-                            let _ = fuel_irq;
+                        {
+                            if let Ok(fuel_irq) = device.fuel_gauge.query_alerts() {
+                                let _ = fuel_irq;
+                            }
                         }
 
                         // DAC IRQs.
