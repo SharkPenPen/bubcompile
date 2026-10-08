@@ -4,8 +4,12 @@
 //! Intended for board bring-up / repair: find missing or unsoldered parts.
 //!
 //! Checks run through the existing drivers, so a pass also proves the
-//! driver's I2C / GPIO path to that part works.
+//! driver's I2C / GPIO / SPI path to that part works.
+//!
+//! This module deliberately contains no `unwrap()` / `?` on hardware access, and
+//! it is called *before* anything that can abort boot.
 
+use std::fmt::{Display, Formatter};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,9 +17,29 @@ use std::time::{Duration, Instant};
 use esp_idf_svc::hal::gpio::{InputPin, IOPin};
 
 use super::Device;
+use crate::power::CUTOFF_VOLTAGE;
+
+/// Outcome counters for one self-test pass.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Summary {
+    pub failures: u32,
+    pub warnings: u32,
+}
+
+impl Summary {
+    pub fn is_clean(&self) -> bool {
+        self.failures == 0
+    }
+}
+
+impl Display for Summary {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} failure(s), {} warning(s)", self.failures, self.warnings)
+    }
+}
 
 /// Run the self-test. Never blocks boot; results go to the log.
-pub fn run_tests(device: &mut Device) {
+pub fn run_tests(device: &mut Device<'_>) -> Summary {
     log::info!("=== Hardware Self-Test (non-fatal) ===");
     let mut failures = 0u32;
     let mut warnings = 0u32;
@@ -36,19 +60,22 @@ pub fn run_tests(device: &mut Device) {
             warnings += 1;
         }
 
-        #[cfg(any(feature = "has_max17048", feature = "has_bq27427"))]
-        {
-            #[cfg(feature = "has_max17048")]
-            let fg_desc = "MAX17048 (0x36)";
-            #[cfg(feature = "has_bq27427")]
-            let fg_desc = "BQ27427 (0x55)";
+        #[cfg(feature = "has_max17048")]
+        let fg_desc = "MAX17048 (0x36)";
+        #[cfg(feature = "has_bq27427")]
+        let fg_desc = "BQ27427 (0x55)";
 
-            match device.fuel_gauge.get_battery_voltage() {
-                Ok(v) => log::info!("[PWR] Fuel gauge {fg_desc}: {v:.2} V"),
-                Err(e) => {
-                    log::warn!("[PWR] Fuel gauge {fg_desc} read failed: {e}. Check: chip solder joints, I2C SDA/SCL, pull-ups");
-                    failures += 1;
+        match device.fuel_gauge.get_battery_voltage() {
+            Ok(v) => {
+                log::info!("[PWR] Fuel gauge {fg_desc}: {v:.2} V");
+                if v < CUTOFF_VOLTAGE && !device.get_vbus_pgood() {
+                    log::warn!("[PWR] Battery {v:.2} V is below the {CUTOFF_VOLTAGE} V cutoff - do not expect a full boot");
+                    warnings += 1;
                 }
+            }
+            Err(e) => {
+                log::warn!("[PWR] Fuel gauge {fg_desc} read failed: {e}. Check: chip solder joints, I2C SDA/SCL, pull-ups");
+                failures += 1;
             }
         }
     }
@@ -175,6 +202,27 @@ pub fn run_tests(device: &mut Device) {
         }
     }
 
+    // ── system_data partition (/system, read-only FAT) ─
+    // This is the most common reason for a device that "flashes but does nothing":
+    // without boot.bit.hs the FPGA can never be configured.
+    {
+        if device.system_data_mounted {
+            let missing: Vec<&str> = ["boot.bit.hs", "gameboy.bit.hs", "gba.bit.hs"]
+                .into_iter()
+                .filter(|name| !std::path::Path::new("/system").join(name).is_file())
+                .collect();
+            if missing.is_empty() {
+                log::info!("[SYS] /system mounted, boot/gameboy/gba bitstreams present: OK");
+            } else {
+                log::warn!("[SYS] /system mounted but missing {}. Flash the partition with `python3 flash_system_data.py <dir>`", missing.join(", "));
+                failures += 1;
+            }
+        } else {
+            log::warn!("[SYS] system_data NOT mounted at /system - the FPGA cannot be configured. Flash it with `python3 flash_system_data.py <dir>` (needs IDF_PATH)");
+            failures += 1;
+        }
+    }
+
     // ── SD card ───────────────────────────────────────
     {
         if device.sdcard.is_some() {
@@ -248,5 +296,65 @@ pub fn run_tests(device: &mut Device) {
         }
     }
 
-    log::info!("=== Self-test complete: {failures} failure(s), {warnings} warning(s) — boot continues ===");
+    let summary = Summary {
+        failures,
+        warnings,
+    };
+    log::info!("=== Self-test complete: {summary} - boot continues ===");
+    summary
+}
+
+/// How often the diagnostic report is repeated.
+const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
+/// Power-button hold time needed to shut down from diagnostic mode.
+const POWER_OFF_HOLD: Duration = Duration::from_secs(3);
+
+/// Last-resort diagnostic mode.
+///
+/// Called when the FPGA cannot be brought up at all. The FPGA drives the LCD, so
+/// the screen will stay blank - the point of this mode is to **keep the ESP32
+/// alive and keep the serial log flowing** instead of dying, so the board can be
+/// diagnosed over the console. Never returns.
+pub fn hold_alive(device: &mut Device<'_>, reason: &str) -> ! {
+    log::error!("============================================================");
+    log::error!("[BRINGUP] FPGA BRING-UP FAILED - staying alive in diagnostics");
+    log::error!("[BRINGUP] reason: {reason}");
+    log::error!("[BRINGUP] The FPGA drives the LCD, so the screen stays blank.");
+    log::error!("[BRINGUP] The report below repeats every 5 s on the serial console.");
+    log::error!("============================================================");
+
+    crate::led::LedController::set_behavior(crate::led::LedBehavior::blink(
+        Duration::from_millis(1000),
+        None,
+    ));
+    // Backlight on so there is at least a visible "powered" indication.
+    device.set_lcd_enabled(true);
+
+    let mut power_pressed_since: Option<Instant> = None;
+
+    loop {
+        log::info!("--- [BRINGUP] diagnostic report (FPGA not running) ---");
+        run_tests(device);
+
+        // Long-press power to shut down.
+        if device.button_power.is_low() {
+            let since = *power_pressed_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= POWER_OFF_HOLD {
+                log::info!("[BRINGUP] Power button held - shutting down");
+                device.power_off();
+            }
+        } else {
+            power_pressed_since = None;
+        }
+
+        // Battery cutoff, mirroring `power.rs`.
+        if let Ok(voltage) = device.fuel_gauge.get_battery_voltage() {
+            if voltage <= CUTOFF_VOLTAGE && !device.get_vbus_pgood() {
+                log::warn!("[BRINGUP] Battery {voltage:.2} V below cutoff - shutting down");
+                device.power_off();
+            }
+        }
+
+        thread::sleep(DIAGNOSTIC_INTERVAL);
+    }
 }

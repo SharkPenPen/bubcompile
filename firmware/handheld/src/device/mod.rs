@@ -112,6 +112,20 @@ pub struct Device<'a> {
 
     /// Dock state
     pub docked: bool,
+
+    /// True once the `system_data` partition is mounted at `/system`.
+    ///
+    /// Mount failure is no longer fatal (a device without bitstreams should still
+    /// boot far enough to tell you *why*), so the result is recorded here and
+    /// reported by the bring-up report.
+    pub system_data_mounted: bool,
+
+    /// True once a bitstream has been loaded **and** the FPGA answered on SPI.
+    ///
+    /// Until this is set, the FPGA interrupt is not armed and the UI is not
+    /// started: an unconfigured FPGA leaves `mcu_irq_n` floating, which used to
+    /// produce a level-triggered interrupt storm plus panics in the handler.
+    pub fpga_ready: bool,
 }
 
 impl Device<'_> {
@@ -243,7 +257,12 @@ impl Device<'_> {
             .context("I2cDriver")?;
         let i2c = &*Box::leak(Box::new(Mutex::new(i2c)));
 
-        let pin_irq = PinDriver::input(pin_irq)?;
+        // The FPGA IRQ line is active-low and is only driven once the FPGA is
+        // configured. Before that it floats, so pull it up: a floating input on a
+        // LEVEL-triggered interrupt produced an interrupt storm that starved the
+        // whole application (this was the "device does not boot" symptom).
+        let mut pin_irq = PinDriver::input(pin_irq)?;
+        pin_irq.set_pull(gpio::Pull::Up)?;
 
         // LCD backlight
         let lcd_backlight = {
@@ -328,13 +347,23 @@ impl Device<'_> {
                 let mut lcd = drivers::ili9806e::ILI9806E::new(lcd_reset, lcd_spi);
             }
         }
-        lcd.init().context("LCD init")?;
+        // LCD init: non-fatal. A missing/unsoldered panel must not stop boot -
+        // we want the device to still come up and tell us about it.
+        if let Err(e) = lcd.init() {
+            log::error!("LCD init failed: {e}. Continuing; the display may stay blank");
+        }
 
-        // Setup I/O expander (Rev 1 and Rev 2 only)
+        // Setup I/O expander (Rev 1 and Rev 2 only). Non-fatal: an absent or
+        // unsoldered TCA9535 must not prevent boot.
         cfg_if::cfg_if! {
             if #[cfg(feature = "has_io_expander")] {
                 let mut io_expander = drivers::io_expander::TCA9535::new(MutexI2C::new(&i2c));
-                io_expander.get_pins()?;
+                match io_expander.get_pins() {
+                    Ok(pins) => log::info!("TCA9535 (0x20) present"),
+                    Err(e) => log::error!(
+                        "TCA9535 (0x20) not responding: {e}. Continuing without it"
+                    ),
+                }
             }
         }
 
@@ -365,7 +394,7 @@ impl Device<'_> {
                 let mut fuel_gauge = drivers::max17048::MAX17048::new(MutexI2C::new(&i2c));
                 let _ = fuel_gauge.set_alert_soc_change(true); // fuel gauge won't work without a battery
             } else if #[cfg(feature = "has_bq27427")] {
-                let fuel_gauge = drivers::bq27427::BQ27427::new(MutexI2C::new(&i2c));
+                let mut fuel_gauge = drivers::bq27427::BQ27427::new(MutexI2C::new(&i2c));
 
                 // Fuel gauge requires configuration, which could block for multiple seconds. Run it in another thread,
                 // with a new instance of the driver. Scary, but fine, because the driver has no state
@@ -392,6 +421,25 @@ impl Device<'_> {
         pin_vbus_pgood.set_pull(gpio::Pull::Up)?;
         let pin_batt_chg = PinDriver::input(pin_batt_chg)?;
 
+        // ── Power-on protection (soft interlock) ──────────────────────────
+        // Do not ramp the FPGA / LCD / audio rails on a battery that cannot
+        // sustain them: a brown-out while those rails come up is how hardware gets
+        // damaged, and it presents as "the board is dead". The rails are already
+        // enabled at this point, so this stops *before configuring anything*:
+        // FPGA power is dropped, bitstream loading then fails cleanly, and `main`
+        // ends up in the diagnostics loop instead of browning out.
+        let vbus_present = pin_vbus_pgood.is_low(); // active low
+        if let Ok(voltage) = fuel_gauge.get_battery_voltage() {
+            if voltage < crate::power::CUTOFF_VOLTAGE && !vbus_present {
+                log::error!(
+                    "[PWR] PROTECTION: battery {voltage:.2} V < {} V and no VBUS - keeping the \
+                     FPGA powered DOWN to avoid a brown-out",
+                    crate::power::CUTOFF_VOLTAGE
+                );
+                fpga_power.set_low()?;
+            }
+        }
+
         // Setup IMU
         let mut imu = drivers::imu::LSM6DS3TRC::new(MutexI2C::new(&i2c));
         if let Err(e) = imu.init() {
@@ -402,21 +450,28 @@ impl Device<'_> {
         let time_since_fpga_power = Instant::now().duration_since(fpga_power_time);
         std::thread::sleep(FPGA_POWER_DELAY.saturating_sub(time_since_fpga_power));
 
-        // Setup DAC (requires fpga_power on)
+        // Setup DAC (requires fpga_power on). Non-fatal: the codec being absent or
+        // its I2C NAKing must not stop boot.
         log::info!("Initializing DAC");
         let dac_reset = PinDriver::output(pin_dac_reset)?;
         let mut dac = drivers::dac::TLV320DAC3101::new(dac_reset, MutexI2C::new(&i2c));
-        dac.init().context("DAC init")?;
-        dac.configure_interrupts().context("DAC interrupts")?;
-        dac.set_power_down(0, true).context("DAC power down")?;
-        dac.set_volume(kvs::keys::VOLUME.get().unwrap())
-            .context("DAC set volume")?;
-        dac.set_mute(false).context("DAC set mute")?;
-        let headphones_detected = dac
-            .get_headphones_detected()
-            .context("DAC get headphones")?;
-        dac.set_headphones_enabled(headphones_detected)?;
-        dac.set_speakers_enabled(!headphones_detected)?;
+        let dac_result = (|| -> Result<(), anyhow::Error> {
+            dac.init().context("init")?;
+            dac.configure_interrupts().context("interrupts")?;
+            dac.set_power_down(0, true).context("power down")?;
+            dac.set_volume(kvs::keys::VOLUME.get().unwrap_or(128))
+                .context("volume")?;
+            dac.set_mute(false).context("mute")?;
+            let headphones = dac.get_headphones_detected().context("headphone detect")?;
+            dac.set_headphones_enabled(headphones)
+                .context("headphone routing")?;
+            dac.set_speakers_enabled(!headphones)
+                .context("speaker routing")?;
+            Ok(())
+        })();
+        if let Err(e) = dac_result {
+            log::error!("[DAC] bring-up incomplete: {e:#}. Audio may be silent");
+        }
 
         // Setup FPGA (without programming)
         let fpga_done = PinDriver::input(pin_fpga_done)?;
@@ -459,8 +514,27 @@ impl Device<'_> {
             fpga_program_spi,
         );
 
-        // Mount system_data to /system
-        drivers::fs::mount_system_data().context("mount system data")?;
+        // Mount system_data to /system.
+        //
+        // NON-FATAL on purpose: if this partition was never flashed (extremely
+        // common when only the app / the CI merged image was written), the old
+        // code returned an error out of `Device::init()`, `main()` propagated it,
+        // and the device never came up at all. Now we boot, report it, and carry
+        // on so the user can see what is wrong.
+        let system_data_mounted = match drivers::fs::mount_system_data() {
+            Ok(()) => {
+                log::info!("system_data mounted at /system");
+                true
+            }
+            Err(e) => {
+                log::error!(
+                    "system_data NOT mounted at /system: {e}. Without boot.bit.hs the \
+                     FPGA cannot be configured; flash the partition with `python3 \
+                     flash_system_data.py <dir>` (requires IDF_PATH)"
+                );
+                false
+            }
+        };
 
         let mut device = Device {
             fpga_power,
@@ -486,7 +560,11 @@ impl Device<'_> {
             imu,
             sdcard,
             docked: false,
+            system_data_mounted,
+            fpga_ready: false,
         };
+        // RTC read errors must not panic (previously `unwrap()` -> panic on any
+        // board whose PCF8563 is missing or NAKing, which killed boot).
         device.init_datetime();
         DEVICE
             .set(Mutex::new(device))
@@ -595,10 +673,15 @@ impl Device<'_> {
     /// Set whether the LCD is enabled or disabled.
     pub fn set_lcd_enabled(&mut self, enabled: bool) {
         self.lcd_backlight.set_enabled(enabled);
-        if enabled {
-            self.lcd.exit_sleep().unwrap();
+        // Never unwrap here: a panel that NAKs/times out used to panic the whole
+        // application (and with panic=abort that means a reset loop).
+        let result = if enabled {
+            self.lcd.exit_sleep()
         } else {
-            self.lcd.enter_sleep().unwrap();
+            self.lcd.enter_sleep()
+        };
+        if let Err(e) = result {
+            log::warn!("LCD enable={enabled} failed: {e}");
         }
     }
 
@@ -609,16 +692,21 @@ impl Device<'_> {
 
     /// Initialize the system time (after boot).
     ///
-    /// Reads the time from the RTC. Sets a default time if no time is set.
-    /// Then sets it in esp-idf (via libc settimeofday).
+    /// Reads the time from the RTC, sets a default if none is set, then pushes it
+    /// into esp-idf (via libc settimeofday). Never fatal: a missing PCF8563 used to
+    /// panic here and kill the whole boot.
     fn init_datetime(&mut self) {
-        if self.rtc.read_datetime().unwrap().is_none() {
-            log::warn!("No date set, resetting");
-            self.rtc
-                .write_datetime(drivers::rtc::Datetime::default())
-                .unwrap();
+        match self.rtc.read_datetime() {
+            Ok(None) => {
+                log::warn!("[RTC] no valid time, resetting to 2000-01-01");
+                let _ = self
+                    .rtc
+                    .write_datetime(drivers::rtc::Datetime::default());
+            }
+            Err(e) => log::warn!("[RTC] read failed: {e}; using a default time"),
+            Ok(Some(_)) => {}
         }
-        Device::set_esp_datetime(self.get_datetime());
+        Self::set_esp_datetime(self.get_datetime());
     }
 
     /// Set the esp-idf system time.
@@ -633,13 +721,19 @@ impl Device<'_> {
         }
     }
 
-    /// Get the Device datetime.
+    /// Get the Device datetime. Falls back to the year-2000 epoch when the RTC
+    /// cannot be read (never panics).
     pub fn get_datetime(&mut self) -> time::OffsetDateTime {
-        let rtc_time = self.rtc.read_datetime().unwrap();
-        let ts = rtc_time
-            .and_then(|dt| dt.as_timestamp())
-            .unwrap_or(drivers::rtc::TIMESTAMP_2000);
-        time::OffsetDateTime::from_unix_timestamp(ts as i64).unwrap()
+        let ts = match self.rtc.read_datetime() {
+            Ok(Some(dt)) => dt.as_timestamp().unwrap_or(drivers::rtc::TIMESTAMP_2000),
+            Ok(None) => drivers::rtc::TIMESTAMP_2000,
+            Err(e) => {
+                log::warn!("RTC read failed for datetime: {e}");
+                drivers::rtc::TIMESTAMP_2000
+            }
+        };
+        time::OffsetDateTime::from_unix_timestamp(ts as i64)
+            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
     }
 
     /// Set the Device datetime.
@@ -647,8 +741,10 @@ impl Device<'_> {
         log::info!("Setting system time: {:?}", dt);
         Device::set_esp_datetime(dt);
         let ts = dt.unix_timestamp();
-        let dt = drivers::rtc::Datetime::from_timestamp(ts as u64).unwrap_or_default();
-        self.rtc.write_datetime(dt).unwrap();
+        let rtc_dt = drivers::rtc::Datetime::from_timestamp(ts as u64).unwrap_or_default();
+        if let Err(e) = self.rtc.write_datetime(rtc_dt) {
+            log::warn!("RTC write failed: {e}");
+        }
     }
 
     /// Update the display mode (internal vs external).
@@ -695,11 +791,24 @@ impl Device<'_> {
     }
 
     /// Cartridge slot switch: true for pressed (Game Boy), false for not (GBA).
+    ///
+    /// rev4 reads a real MCU GPIO; rev2 must ask the FPGA, which is only valid
+    /// once the FPGA is configured - return the GBA default otherwise instead of
+    /// panicking.
     pub fn get_cart_switch(&mut self) -> bool {
         if let Some(pin) = self.pin_cart_switch.as_ref() {
             pin.is_high()
+        } else if self.fpga_ready {
+            match self.fpga.get_cartridge_slot_button() {
+                Ok(pressed) => pressed,
+                Err(e) => {
+                    log::warn!("Cartridge switch read failed: {e}");
+                    false
+                }
+            }
         } else {
-            self.fpga.get_cartridge_slot_button().unwrap()
+            log::warn!("Cartridge switch unavailable (FPGA not configured)");
+            false
         }
     }
 

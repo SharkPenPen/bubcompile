@@ -128,23 +128,30 @@ pub struct UI {
 
 impl UI {
     pub fn new(device: &mut Device) -> Self {
-        device
+        // Best effort: a dead FPGA must not panic the UI into a reset loop.
+        if let Err(e) = device
             .fpga
             .write_u32(crate::bitstream::boot::REG_LOGO_Y, 38)
-            .unwrap();
+        {
+            log::warn!("[UI] Could not set logo position: {e}");
+        }
         let display_mode = if device.docked {
             DisplayMode::External
         } else {
             DisplayMode::Internal
         };
-        device.change_display_mode(display_mode).unwrap();
+        if let Err(e) = device.change_display_mode(display_mode) {
+            log::warn!("[UI] Could not set display mode: {e}");
+        }
         // Start the boot animation after a delay.
         Timer::single_shot(Duration::from_millis(500), || {
             let animation = 1 | (6 << 2); // 6: 0.66 seconds
-            Device::lock()
+            if let Err(e) = Device::lock()
                 .fpga
                 .write_u32(crate::bitstream::boot::REG_LOGO_ANIM, animation)
-                .unwrap(); // Start animation (no loop)
+            {
+                log::warn!("[UI] Could not start the boot animation: {e}");
+            }
         });
 
         // Set up the idle timer

@@ -15,7 +15,9 @@ static POWER_MANAGER: LazyLock<Mutex<PowerManager>> =
     LazyLock::new(|| Mutex::new(PowerManager::new()));
 
 const MONITOR_INTERVAL: Duration = Duration::from_secs(30);
-const CUTOFF_VOLTAGE: f32 = 3.3;
+/// Battery cutoff voltage. Shared by the power manager, the boot self-test and
+/// the power-on protection interlock so there is exactly one definition.
+pub const CUTOFF_VOLTAGE: f32 = 3.3;
 
 pub struct PowerManager {
     monitor_timer: Option<EspTimer<'static>>,

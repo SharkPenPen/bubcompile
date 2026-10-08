@@ -43,9 +43,13 @@ impl Device<'_> {
     /// Setup interrupts on the Device interrupt sources:
     ///
     /// * Volume up, volume down, home, and power buttons
-    /// * Shared MCU_IRQ line
+    /// * Shared MCU_IRQ line (FPGA + DAC + fuel gauge)
+    ///
+    /// Every subscription failure is logged and skipped instead of `unwrap()`-ed,
+    /// and the handler gates all FPGA access on `Device::fpga_ready`: the shared
+    /// line floats until the FPGA is configured, and a floating input on a
+    /// level-triggered interrupt used to storm and starve the whole application.
     pub(super) fn setup_interrupts() {
-        // Setup interrupt handler thread.
         std::thread::Builder::new()
             .name("Interrupt".to_string())
             .stack_size(4 * 1024)
@@ -54,48 +58,55 @@ impl Device<'_> {
 
                 {
                     let device = &mut Device::get().lock().unwrap();
-                    setup_gpio_interrupt(
-                        &mut device.button_home,
+
+                    macro_rules! arm {
+                        ($pin:expr, $type:expr, $flag:expr, $name:literal) => {{
+                            let result = setup_gpio_interrupt(
+                                &mut $pin,
+                                $type,
+                                notification.notifier(),
+                                $flag,
+                            );
+                            if let Err(e) = result {
+                                log::error!(
+                                    "Cannot arm {} interrupt: {e}. Continuing without it",
+                                    $name
+                                );
+                            }
+                        }};
+                    }
+
+                    arm!(device.button_home, InterruptType::AnyEdge, FLAG_HOME, "Home button");
+                    arm!(
+                        device.button_power,
                         InterruptType::AnyEdge,
-                        notification.notifier(),
-                        FLAG_HOME,
-                    )
-                    .unwrap();
-                    setup_gpio_interrupt(
-                        &mut device.button_power,
-                        InterruptType::AnyEdge,
-                        notification.notifier(),
                         FLAG_POWER,
-                    )
-                    .unwrap();
-                    setup_gpio_interrupt(
-                        &mut device.button_vol_up,
+                        "Power button"
+                    );
+                    arm!(
+                        device.button_vol_up,
                         InterruptType::AnyEdge,
-                        notification.notifier(),
                         FLAG_VOL_UP,
-                    )
-                    .unwrap();
-                    setup_gpio_interrupt(
-                        &mut device.button_vol_down,
+                        "Vol+ button"
+                    );
+                    arm!(
+                        device.button_vol_down,
                         InterruptType::AnyEdge,
-                        notification.notifier(),
                         FLAG_VOL_DOWN,
-                    )
-                    .unwrap();
-                    setup_gpio_interrupt(
-                        &mut device.pin_irq,
-                        InterruptType::LowLevel,
-                        notification.notifier(),
-                        FLAG_MCU_IRQ,
-                    )
-                    .unwrap();
-                    setup_gpio_interrupt(
-                        &mut device.pin_vbus_pgood,
+                        "Vol- button"
+                    );
+                    arm!(
+                        device.pin_vbus_pgood,
                         InterruptType::AnyEdge,
-                        notification.notifier(),
                         FLAG_VBUS_PGOOD,
-                    )
-                    .unwrap();
+                        "VBUS pgood"
+                    );
+
+                    // The shared MCU_IRQ line is only driven once the FPGA is
+                    // configured; `pin_irq` has an internal pull-up so a floating
+                    // line cannot trigger a storm. The handler additionally gates
+                    // all FPGA access on `Device::fpga_ready`.
+                    arm!(device.pin_irq, InterruptType::LowLevel, FLAG_MCU_IRQ, "MCU_IRQ");
                 }
 
                 #[allow(unused)]
@@ -109,6 +120,7 @@ impl Device<'_> {
 
                     let mut device = Device::get().lock().unwrap();
 
+                    // ESP32 GPIO interrupts must be re-armed after each trigger.
                     if (flags & FLAG_HOME.get()) != 0 {
                         let _ = device.button_home.enable_interrupt();
                     }
@@ -126,12 +138,14 @@ impl Device<'_> {
                     }
                     let mut poll_buttons = (flags & FLAG_BUTTONS) != 0;
 
-                    // Rev 2, must read I/O expander to clear IRQ.
+                    // Rev 2: reading the I/O expander is what clears its IRQ.
+                    // Non-fatal: an absent chip must not kill the handler.
                     #[cfg(feature = "has_io_expander")]
-                    #[allow(unused)]
-                    let io_expander = device.io_expander.get_pins().unwrap();
+                    if let Err(e) = device.io_expander.get_pins() {
+                        log::debug!("I/O expander read failed: {e}");
+                    }
 
-                    // Handle dock monitoring: on VBUS pgood falling, force undock
+                    // Dock monitoring: on VBUS pgood falling, force undock.
                     let vbus_pgood = device.get_vbus_pgood();
                     if prev_vbus_pgood != Some(vbus_pgood) {
                         prev_vbus_pgood = Some(vbus_pgood);
@@ -143,7 +157,7 @@ impl Device<'_> {
                     if (flags & FLAG_MCU_IRQ.get()) != 0 {
                         log::debug!("Interrupt: MCU_IRQ");
 
-                        // Fuel gauge IRQs.
+                        // Fuel gauge IRQs (rev2).
                         #[cfg(feature = "has_max17048")]
                         if let Ok(fuel_irq) = device.fuel_gauge.query_alerts() {
                             let _ = fuel_irq;
@@ -152,30 +166,46 @@ impl Device<'_> {
                         // DAC IRQs.
                         if let Ok(dac_irq) = device.dac.get_interrupt_status() {
                             if dac_irq.headset_detected {
-                                let has_headphones = device.dac.get_headphones_detected().unwrap();
-                                worker::send(worker::Message::HeadphoneState(has_headphones));
+                                if let Ok(has_headphones) = device.dac.get_headphones_detected() {
+                                    worker::send(worker::Message::HeadphoneState(has_headphones));
+                                }
                             }
                         }
 
-                        // FPGA IRQs
-                        let fpga_irq = device.fpga.read_u32(fpga::REG_CTRL_IRQ_PENDING).unwrap();
-                        if fpga_irq != 0 {
-                            device
-                                .fpga
-                                .write_u32(fpga::REG_CTRL_IRQ_PENDING, fpga_irq)
-                                .unwrap();
-                            worker::send(worker::Message::FpgaIrq(fpga_irq));
-                        }
-                        if (fpga_irq & fpga::Irq::Button.as_flag()) != 0 {
-                            poll_buttons = true;
+                        // FPGA IRQs. Skipped entirely until the FPGA is known to be
+                        // configured - otherwise this hammered the SPI bus (and the
+                        // old code `unwrap()`-ed the result).
+                        if device.fpga_ready {
+                            match device.fpga.read_u32(fpga::REG_CTRL_IRQ_PENDING) {
+                                Ok(fpga_irq) => {
+                                    if fpga_irq != 0 {
+                                        if let Err(e) = device
+                                            .fpga
+                                            .write_u32(fpga::REG_CTRL_IRQ_PENDING, fpga_irq)
+                                        {
+                                            log::warn!(
+                                                "Cannot clear FPGA IRQ: {e}"
+                                            );
+                                        } else {
+                                            worker::send(worker::Message::FpgaIrq(fpga_irq));
+                                        }
+                                    }
+                                    if (fpga_irq & fpga::Irq::Button.as_flag()) != 0 {
+                                        poll_buttons = true;
+                                    }
+                                }
+                                Err(e) => log::warn!("FPGA IRQ read failed: {e}"),
+                            }
                         }
 
                         let _ = device.pin_irq.enable_interrupt();
                     }
 
-                    if poll_buttons {
-                        let input_state = device.get_input_state().unwrap();
-                        ui::send(ui::Message::InputState(input_state));
+                    if poll_buttons && device.fpga_ready {
+                        match device.get_input_state() {
+                            Ok(input_state) => ui::send(ui::Message::InputState(input_state)),
+                            Err(()) => log::debug!("Input state read failed"),
+                        }
                     }
                 }
             })

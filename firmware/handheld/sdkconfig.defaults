@@ -1,3 +1,18 @@
+# ── Console / logging ───────────────────────────────────────────────────────
+# Boot/post-mortem logging is the primary maintenance interface on this board.
+# Primary console: UART0 on GPIO43 (TX) / GPIO44 (RX) at 115200 8N1.
+# Secondary console: the USB-C USB Serial/JTAG port (GPIO19/20), so the same log
+# is visible through either hookup. `espflash monitor` reads the USB one.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# Keep INFO (and above) available at runtime; `main()` also calls
+# `log::set_max_level(Info)` so a release build cannot filter the boot log away.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+
 # Increase clock speed to 240 MHz to improve UI performance
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
