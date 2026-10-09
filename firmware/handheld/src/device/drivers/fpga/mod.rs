@@ -38,6 +38,37 @@ pub const REG_STATUS_CART_SWITCH: u32 = 0xF100_2004;
 pub const REG_CMD_HOST_BASE: u32 = 0xF000_0000;
 pub const REG_CMD_CORE_BASE: u32 = 0xF000_1000;
 
+// ── Legacy register map: upstream v0.1 bitstreams (Feb 2025) ──────────────
+//
+// The bitstreams bundled in `system-src/` predate the framework register map
+// this firmware was written against. They speak the same SPI protocol, use the
+// same command encoding and the same overlay pixel format, but a different
+// address layout: a 16-bit register map at 0x0000_xxxx and the overlay at
+// 0x3800_0000. `Generation` plus `translate` below bridge the two.
+pub const REG_V01_CONTROL: u32 = 0x0000_0000;
+pub const REG_V01_BUTTON: u32 = 0x0000_0004;
+pub const REG_V01_DISPLAY: u32 = 0x0000_0008;
+pub const REG_V01_IRQ_ENABLE: u32 = 0x0000_000C;
+pub const REG_V01_IRQ_STATUS: u32 = 0x0000_0010;
+pub const REG_V01_STATUS: u32 = 0x0000_0014;
+pub const REG_V01_OVERLAY_XCTRL: u32 = 0x0000_0100;
+pub const REG_V01_OVERLAY_YCTRL: u32 = 0x0000_0104;
+/// Framebuffer dimensions, read only: `width << 16 | height`.
+pub const REG_V01_FB_DIM: u32 = 0x0000_0200;
+pub const REG_V01_OVERLAY_BASE: u32 = 0x3800_0000;
+
+/// Which generation of bitstream is running, which decides how register
+/// addresses are interpreted.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Generation {
+    /// Current bitstreams: framework registers at `0xF1_xxxx`, overlay at
+    /// `0xF2_xxxxxx`.
+    Framework,
+    /// Upstream v0.1 bitstreams, i.e. everything currently shipped in
+    /// `system-src/`.
+    V01,
+}
+
 /// The FPGA (due to the spi implementation) can read at a speed that's some
 /// fraction of the SPI domain clock speed. At 200 MHz SPI receiver clock,
 /// 16 MHz is a safe speed.
@@ -97,6 +128,10 @@ pub struct Fpga<
 
     /// Bitfield of enabled interrupts
     interrupts: u32,
+
+    /// Which bitstream generation is running. Detected once after programming;
+    /// until then we assume the current framework layout.
+    generation: Generation,
 }
 
 impl<'a, PinDone, PinProgramB, PinInitB, ProgramSpi>
@@ -122,6 +157,7 @@ where
             program_spi,
             system_clock: Hertz(8 * 1024 * 1024),
             interrupts: 0,
+            generation: Generation::Framework,
         }
     }
 
@@ -310,17 +346,149 @@ where
         )
     }
 
+    /// Map a framework register address onto the running bitstream's map.
+    ///
+    /// Returns `None` for registers the running bitstream does not have, so
+    /// callers turn that into a no-op instead of writing somewhere unrelated -
+    /// in the v0.1 map `0x0000_0004` is the *button* register, so a stray write
+    /// to what the framework calls the boot logo's Y position would corrupt
+    /// button forcing.
+    fn translate(&self, address: u32) -> Option<u32> {
+        if self.generation == Generation::Framework {
+            return Some(address);
+        }
+        if (0xF200_0000..0xF300_0000).contains(&address) {
+            return Some(REG_V01_OVERLAY_BASE | (address & 0x00FF_FFFF));
+        }
+        // The core command windows, including the per-word offsets callers derive
+        // from their base address, have no v0.1 equivalent at all.
+        if (0xF000_0000..0xF100_0000).contains(&address) {
+            return None;
+        }
+        Some(match address {
+            // v0.1 has no version register; its framebuffer dimensions serve as
+            // both a liveness probe and the geometry source.
+            REG_INFO_FRAMEWORK_VER => REG_V01_FB_DIM,
+            // IRQ flags keep the same bit order as the framework map.
+            REG_CTRL_IRQ_ENABLE => REG_V01_IRQ_ENABLE,
+            REG_CTRL_IRQ_PENDING => REG_V01_IRQ_STATUS,
+            REG_CTRL_BUTTON_FORCE => REG_V01_BUTTON,
+            REG_CTRL_DOCK => REG_V01_DISPLAY,
+            REG_STATUS_CART_SWITCH => REG_V01_STATUS,
+            // The boot logo registers live in the low core space, which in the
+            // v0.1 map is the register map itself. There is no logo to position
+            // in that bitstream, so drop these.
+            0x0000_0000..=0x0000_0007 => return None,
+            // Present in the framework map but with no v0.1 equivalent: drop
+            // rather than alias onto an unrelated register. Buttons in particular
+            // come from the I/O expander there, not from a register.
+            REG_INFO_SYSCLK_HZ
+            | REG_INFO_VIDEO_DIM
+            | REG_INFO_VIDEO_DEPTH
+            | REG_CTRL_FOCUS
+            | REG_CTRL_VIBRATE
+            | REG_CTRL_CMD_HOST
+            | REG_CTRL_CMD_CORE
+            | REG_STATUS_BUTTON => return None,
+            // Everything else is core memory, which the v0.1 map relocates to its
+            // own interface. Not remapped yet - that is what running a cartridge
+            // needs.
+            other => other,
+        })
+    }
+
     pub fn write_u32(&mut self, address: u32, data: u32) -> Result<(), Error> {
+        match self.translate(address) {
+            Some(address) => self.write_u32_raw(address, data),
+            None => Ok(()),
+        }
+    }
+
+    pub fn read_u32(&mut self, address: u32) -> Result<u32, Error> {
+        match self.translate(address) {
+            Some(address) => self.read_u32_raw(address),
+            // A register the running bitstream does not have reads as zero, so
+            // callers see "nothing there" rather than bus noise.
+            None => Ok(0),
+        }
+    }
+
+    fn write_u32_raw(&mut self, address: u32, data: u32) -> Result<(), Error> {
         let command = SpiCommand::new(FpgaSpiWordSize::Bits32);
         let data = data.to_le_bytes();
         self.spi_write(None, command, address, &data)
     }
 
-    pub fn read_u32(&mut self, address: u32) -> Result<u32, Error> {
+    fn read_u32_raw(&mut self, address: u32) -> Result<u32, Error> {
         let mut data = [0u8; 4];
         let command = SpiCommand::new(FpgaSpiWordSize::Bits32);
         self.spi_read(Some(MAX_SPI_READ_CLOCK), command, address, &mut data)?;
         Ok(u32::from_le_bytes(data))
+    }
+
+    /// Probe the running bitstream's generation without changing any state.
+    ///
+    /// The framework register exposes a known version; v0.1 has no such
+    /// register, so it is recognised by its framebuffer-dimension register
+    /// holding a plausible `width << 16 | height`.
+    pub fn detect_generation(&mut self) -> Option<Generation> {
+        if self.read_u32_raw(REG_INFO_FRAMEWORK_VER).unwrap_or(0) == 0xB000_0001 {
+            return Some(Generation::Framework);
+        }
+        let dim = self.read_u32_raw(REG_V01_FB_DIM).unwrap_or(0);
+        let (width, height) = (dim >> 16, dim & 0xFFFF);
+        if (16..=4096).contains(&width) && (16..=4096).contains(&height) {
+            return Some(Generation::V01);
+        }
+        None
+    }
+
+    pub fn set_generation(&mut self, generation: Generation) {
+        self.generation = generation;
+    }
+
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    /// Framebuffer dimensions reported by a v0.1 bitstream, as `(width, height)`.
+    pub fn get_framebuffer_dimensions(&mut self) -> Option<(u16, u16)> {
+        let dim = self.read_u32_raw(REG_V01_FB_DIM).ok()?;
+        let (width, height) = ((dim >> 16) as u16, (dim & 0xFFFF) as u16);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        Some((width, height))
+    }
+
+    /// Configure the overlay drawing window.
+    ///
+    /// Only v0.1 has these registers; current bitstreams keep the overlay
+    /// enabled, so this is deliberately a no-op for them.
+    pub fn set_overlay_bounds(
+        &mut self,
+        start_x: u8,
+        end_x: u8,
+        scroll_x: u8,
+        start_y: u8,
+        end_y: u8,
+        scroll_y: u8,
+    ) -> Result<(), Error> {
+        if self.generation != Generation::V01 {
+            return Ok(());
+        }
+        let config_x =
+            ((start_x as u32) << 16) | ((end_x as u32) << 8) | (scroll_x as u32);
+        let config_y =
+            ((start_y as u32) << 16) | ((end_y as u32) << 8) | (scroll_y as u32);
+        self.write_u32_raw(REG_V01_OVERLAY_XCTRL, config_x)?;
+        self.write_u32_raw(REG_V01_OVERLAY_YCTRL, config_y)
+    }
+
+    /// Show the overlay over its whole area, using the same window upstream's
+    /// v0.1 firmware used.
+    pub fn show_overlay(&mut self) -> Result<(), Error> {
+        self.set_overlay_bounds(0x00, 0xFF, 0x00, 0x00, 0xFF, 0x00)
     }
 
     /// Write overlay framebuffer.
@@ -328,7 +496,11 @@ where
         let command = SpiCommand::new(FpgaSpiWordSize::Bits16);
         // 16 bits per transfer, 2 cycles per transfer.
         let max_clock = (self.system_clock.0 * 16) / (4 * 2);
-        self.spi_write(Some(Hertz(max_clock)), command, 0xF200_0000 | offset, data)
+        let base = match self.generation {
+            Generation::Framework => 0xF200_0000,
+            Generation::V01 => REG_V01_OVERLAY_BASE,
+        };
+        self.spi_write(Some(Hertz(max_clock)), command, base | offset, data)
     }
 
     /// Get the state of the cartridge slot button.

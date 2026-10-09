@@ -143,33 +143,51 @@ fn main() -> anyhow::Result<()> {
         const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
         const PROBE_INTERVAL: Duration = Duration::from_millis(50);
         let probe_started = std::time::Instant::now();
-        let mut last_read = 0u32;
-        let mut fpga_alive = false;
+        let mut detected = None;
         while probe_started.elapsed() < PROBE_TIMEOUT {
-            last_read = device
-                .fpga
-                .read_u32(fpga::REG_INFO_FRAMEWORK_VER)
-                .unwrap_or(0);
-            if last_read == 0xB000_0001 {
-                log::info!(
-                    "[FPGA] Framework version 0xB0000001 OK after {} ms",
-                    probe_started.elapsed().as_millis()
-                );
-                fpga_alive = true;
+            if let Some(generation) = device.fpga.detect_generation() {
+                detected = Some(generation);
                 break;
             }
             std::thread::sleep(PROBE_INTERVAL);
         }
-        device.fpga_ready = fpga_alive;
-        if !fpga_alive {
-            // Never fatal: the original firmware did not probe at all, and a blank
-            // screen with a clear log beats a device that stops before the UI.
-            log::error!(
-                "[FPGA] No framework-version answer within {} ms (last read {last_read:#010X}, \
-                 expected 0xB0000001). The bitstream may be for a different board revision. \
-                 Continuing, but FPGA interrupts stay disabled - check the display.",
-                PROBE_TIMEOUT.as_millis()
-            );
+
+        match detected {
+            Some(generation) => {
+                device.fpga.set_generation(generation);
+                device.fpga_ready = true;
+                log::info!(
+                    "[FPGA] {generation:?} bitstream detected after {} ms",
+                    probe_started.elapsed().as_millis()
+                );
+                if generation == fpga::Generation::V01 {
+                    // Everything this firmware addresses is translated by the
+                    // compatibility layer in the fpga driver; registers the legacy
+                    // bitstream lacks are ignored instead of landing elsewhere.
+                    log::warn!(
+                        "[FPGA] Legacy v0.1 bitstream (the one bundled in system-src/). \
+                         It has no version, focus, vibrate or command registers, so those \
+                         features are inactive; the game buttons come from the I/O expander. \
+                         Running a cartridge is not supported on this bitstream."
+                    );
+                    if let Some((width, height)) = device.fpga.get_framebuffer_dimensions() {
+                        log::info!("[FPGA] v0.1 framebuffer {width}x{height}");
+                    }
+                    if let Err(e) = device.fpga.show_overlay() {
+                        log::error!("[FPGA] Could not enable the overlay: {e}");
+                    }
+                }
+            }
+            None => {
+                // Never fatal: the original firmware did not probe at all, and a blank
+                // screen with a clear log beats a device that stops before the UI.
+                device.fpga_ready = false;
+                log::error!(
+                    "[FPGA] No known bitstream answered within {} ms. Continuing, but FPGA \
+                     interrupts stay disabled - check the display.",
+                    PROBE_TIMEOUT.as_millis()
+                );
+            }
         }
 
         device

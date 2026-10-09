@@ -326,6 +326,18 @@ impl CoreManager {
         timeout: Duration,
     ) -> Result<(), CoreError> {
         assert!(request.len() > 0);
+
+        // The v0.1 bitstream has no host command channel and no command registers,
+        // so there is nothing to talk to. Fail immediately rather than polling out
+        // the whole timeout against registers the compatibility layer drops.
+        if Device::lock().fpga.generation() == fpga::Generation::V01 {
+            log::error!(
+                "Core command {:08X} unavailable: the running v0.1 bitstream has no command channel",
+                request[0]
+            );
+            return Err(CoreError::CommandFailed(request[0]));
+        }
+
         // Write command and arguments
         {
             let mut device = Device::lock();
