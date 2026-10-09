@@ -130,23 +130,48 @@ fn main() -> anyhow::Result<()> {
 
     device.set_brightness(kvs::keys::BRIGHTNESS.get().unwrap());
 
-    // ── FPGA bring-up. Failure is not fatal: hand over to diagnostics. ────
+    // ── FPGA bring-up. Only a real programming failure is fatal. ──────────
     fn program_fpga(device: &mut Device) -> anyhow::Result<()> {
         log::info!("[FPGA] Loading boot bitstream...");
         bitstream::initial_program_boot(device).context("initial boot bitstream")?;
 
-        // A finished download is not proof of a working FPGA: read the framework
-        // version register back before anything else touches it.
-        let version = device
-            .fpga
-            .read_u32(fpga::REG_INFO_FRAMEWORK_VER)
-            .unwrap_or(0);
-        anyhow::ensure!(
-            version == 0xB000_0001,
-            "FPGA answered {version:#010X}, expected framework version 0xB0000001"
-        );
+        // The FPGA needs a moment after DONE before its MMCM is locked. Until then
+        // `SpiReceiverFifo` is held in reset and drives nothing, so an immediate read
+        // samples a floating bus and returns coupling garbage (0xEEEEEEEE was
+        // observed). Probe with retries, and gate the writes below on the result:
+        // writing the IRQ-enable register before the SPI domain is alive loses it.
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+        const PROBE_INTERVAL: Duration = Duration::from_millis(50);
+        let probe_started = std::time::Instant::now();
+        let mut last_read = 0u32;
+        let mut fpga_alive = false;
+        while probe_started.elapsed() < PROBE_TIMEOUT {
+            last_read = device
+                .fpga
+                .read_u32(fpga::REG_INFO_FRAMEWORK_VER)
+                .unwrap_or(0);
+            if last_read == 0xB000_0001 {
+                log::info!(
+                    "[FPGA] Framework version 0xB0000001 OK after {} ms",
+                    probe_started.elapsed().as_millis()
+                );
+                fpga_alive = true;
+                break;
+            }
+            std::thread::sleep(PROBE_INTERVAL);
+        }
+        device.fpga_ready = fpga_alive;
+        if !fpga_alive {
+            // Never fatal: the original firmware did not probe at all, and a blank
+            // screen with a clear log beats a device that stops before the UI.
+            log::error!(
+                "[FPGA] No framework-version answer within {} ms (last read {last_read:#010X}, \
+                 expected 0xB0000001). The bitstream may be for a different board revision. \
+                 Continuing, but FPGA interrupts stay disabled - check the display.",
+                PROBE_TIMEOUT.as_millis()
+            );
+        }
 
-        device.fpga_ready = true;
         device
             .fpga
             .enable_interrupt(fpga::Irq::Button)

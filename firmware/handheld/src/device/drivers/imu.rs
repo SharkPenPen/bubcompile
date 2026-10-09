@@ -64,11 +64,14 @@ where
             {
                 Ok(()) => {
                     last_id = Some(chip_id);
-                    if chip_id == 0x6A {
+                    // 0x6A = LSM6DS3TR-C, 0x69 = the older LSM6DS3. The register map
+                    // is compatible for the accelerometer/gyroscope registers used
+                    // here, and boards are fitted with either part.
+                    if chip_id == 0x6A || chip_id == 0x69 {
                         break;
                     }
                     log::warn!(
-                        "IMU WHO_AM_I read 0x{:02X} (expected 0x6A), attempt {}/5",
+                        "IMU WHO_AM_I read 0x{:02X} (expected 0x6A or 0x69), attempt {}/5",
                         chip_id, attempt
                     );
                 }
@@ -79,7 +82,7 @@ where
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         match last_id {
-            Some(0x6A) => {}
+            Some(0x6A) | Some(0x69) => {}
             Some(id) => return Err(Error::ChipId(id)),
             None => return Err(Error::I2cError),
         }
