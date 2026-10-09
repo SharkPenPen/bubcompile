@@ -70,9 +70,14 @@ jobs:
           "$RUNNER_TEMP/esptool-venv/bin/pip" install --quiet "esptool<5"
           ls -la "$RUNNER_TEMP/esptool-venv/bin"
           "$RUNNER_TEMP/esptool-venv/bin/python" -m esptool version
+          # merge_bin patches the image header at offset 0, i.e. the bootloader.
+          # It MUST stay `dio`, matching firmware/handheld/bootloader.bin and the
+          # note in espflash.toml: flashing/edge-booting this board in QIO is the
+          # known-broken path (esp-rs/espflash#657). A QIO header here makes the
+          # merged image hang in the ROM stage with a TG0WDT reset loop.
           "$RUNNER_TEMP/esptool-venv/bin/python" -m esptool --chip esp32s3 merge_bin \
             -o "artifacts/handheld-${{ matrix.rev }}-full.bin" \
-            --flash_mode qio --flash_freq 80m --flash_size 8MB \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
             0x0 artifacts/bootloader.bin \
             0x8000 artifacts/partition-table.bin \
             0x100000 "artifacts/handheld-${{ matrix.rev }}.bin"
